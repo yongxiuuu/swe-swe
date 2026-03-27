@@ -53,8 +53,11 @@ services:
 # {{IF LETSENCRYPT}}
       # Port 80 for ACME challenges and HTTP redirect
       - "80:80"
+      # Port 443 for HTTPS with Let's Encrypt certificate
+      - "443:7443"
 # {{ENDIF}}
-# {{IF SSL}}
+# {{IF SELFSIGN}}
+      # Self-signed SSL on custom port
       - "${SWE_PORT:-1977}:7443"
 # {{ENDIF}}
       # Preview proxy ports (per-session)
