@@ -1,0 +1,95 @@
+# swe-swe development environment (hardcoded, no template variables)
+# Claude + Docker CLI, app user uid=999 gid=999
+
+# Stage 1: Build swe-swe-server from source
+FROM gdssingapore/airbase:golang-1.23-builder AS server-builder
+WORKDIR /build
+COPY swe-swe-server/go.mod swe-swe-server/go.sum ./
+RUN go mod download
+COPY swe-swe-server/*.go ./
+COPY swe-swe-server/agent-chat-dist/ ./agent-chat-dist/
+COPY swe-swe-server/static/ ./static/
+COPY swe-swe-server/page-templates/ ./page-templates/
+COPY swe-swe-server/container-templates/ ./container-templates/
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o swe-swe-server .
+
+# Build mcp-lazy-init (generic lazy-init MCP proxy, stdlib only)
+COPY mcp-lazy-init/main.go /build-mcp-lazy-init/main.go
+RUN cd /build-mcp-lazy-init && go mod init mcp-lazy-init && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /build-mcp-lazy-init/mcp-lazy-init .
+
+# Stage 2: Main development environment
+FROM golang:1.23-bookworm
+
+# Install base dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    git \
+    build-essential \
+    ca-certificates \
+    file \
+    jq \
+    less \
+    lsof \
+    unzip \
+    vim \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 24 LTS from NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
+ENV PATH="/usr/local/lib/node_modules/.bin:${PATH}"
+
+# Install browser automation dependencies (Chromium, Xvfb, x11vnc, noVNC)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    xvfb \
+    x11vnc \
+    novnc \
+    websockify \
+    && rm -rf /var/lib/apt/lists/*
+
+# Override default noVNC viewer with custom version
+COPY swe-swe-server/static/vnc_lite.html /usr/share/novnc/vnc_lite.html
+
+# Install Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code
+
+# Install MCP Playwright for browser automation
+RUN npm install -g @playwright/mcp
+
+# Install Docker CLI only (talks to host Docker via mounted socket)
+RUN ARCH="$(dpkg --print-architecture)" && \
+    case "${ARCH}" in \
+        amd64) DOCKER_ARCH="x86_64" ;; \
+        arm64) DOCKER_ARCH="aarch64" ;; \
+        armhf) DOCKER_ARCH="armhf" ;; \
+        *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-27.4.1.tgz" | \
+    tar xz -C /usr/local/bin --strip-components=1 docker/docker
+
+# Install Docker Compose plugin
+RUN ARCH="$(dpkg --print-architecture)" && \
+    case "${ARCH}" in \
+        amd64) COMPOSE_ARCH="x86_64" ;; \
+        arm64) COMPOSE_ARCH="aarch64" ;; \
+        *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;; \
+    esac && \
+    mkdir -p /usr/local/lib/docker/cli-plugins && \
+    curl -fsSL "https://github.com/docker/compose/releases/download/v2.32.4/docker-compose-linux-${COMPOSE_ARCH}" \
+        -o /usr/local/lib/docker/cli-plugins/docker-compose && \
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+# Copy swe-swe-server and mcp-lazy-init binaries from builder stage
+COPY --from=server-builder /build/swe-swe-server /usr/local/bin/swe-swe-server
+COPY --from=server-builder /build-mcp-lazy-init/mcp-lazy-init /usr/local/bin/mcp-lazy-init
+
+# Copy entrypoint script
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+WORKDIR /workspace
+CMD ["/usr/local/bin/swe-swe-server", "-working-directory", "/workspace", "-addr", "0.0.0.0:9898"]
